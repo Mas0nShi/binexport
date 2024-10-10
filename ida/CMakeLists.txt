@@ -33,7 +33,7 @@ ida_target_link_libraries(binexport_plugin_shared PUBLIC
   binexport_core
 )
 
-add_ida_plugin(${binexport_ida_plugin_name}
+add_ida_plugin(${binexport_ida_plugin_name} NOEA32
   arm.cc
   arm.h
   dalvik.cc

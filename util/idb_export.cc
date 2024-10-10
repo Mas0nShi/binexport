@@ -53,16 +53,16 @@ void IdbExporter::AddDatabase(std::string path) {
 
 absl::Status ExportDatabase(const std::string& idb_path,
                             const IdbExporter::Options& options) {
-  const bool is_64bit = absl::EndsWithIgnoreCase(idb_path, kIdbExtension64);
   // Check existence first to avoid running IDA needlessly.
   if (!FileExists(idb_path)) {
     return absl::NotFoundError(absl::StrCat("File not found: " + idb_path));
   }
 
+  // IDA 9.0 and later no more IDA32, so we can use the same executable for both.
 #ifdef _WIN32
-  const std::string ida_exe = is_64bit ? "ida64.exe" : "ida.exe";
+  const std::string ida_exe = "ida.exe";
 #else
-  const std::string ida_exe = is_64bit ? "ida64" : "ida";
+  const std::string ida_exe = "ida";
 #endif
   std::vector<std::string> args;
   args.push_back(JoinPath(options.ida_dir, ida_exe));
