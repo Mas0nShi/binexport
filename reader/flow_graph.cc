@@ -16,22 +16,32 @@
 
 #include <algorithm>
 #include <boost/graph/graph_traits.hpp>  // NOLINT
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "third_party/absl/log/check.h"
 #include "third_party/absl/log/log.h"
 #include "third_party/absl/memory/memory.h"
+#include "third_party/absl/status/status.h"
+#include "third_party/absl/strings/str_cat.h"
+#include "third_party/absl/types/optional.h"
+#include "third_party/zynamics/binexport/architectures.h"
+#include "third_party/absl/strings/ascii.h"
 #include "third_party/zynamics/binexport/reader/graph_utility.h"
+#include "third_party/zynamics/binexport/reader/instruction.h"
+#include "third_party/zynamics/binexport/util/status_macros.h"
 #include "third_party/zynamics/binexport/util/types.h"
 
 namespace security::binexport {
 namespace {
 
 absl::optional<Architecture> GetSupportedArchitecture(const BinExport2& proto) {
-  const std::string& architecture =
-      proto.meta_information().architecture_name();
+  const std::string architecture =
+      absl::AsciiStrToLower(proto.meta_information().architecture_name());
   if (architecture == "arm") {
     return Architecture::kArm;
   }
@@ -69,7 +79,7 @@ uint32_t GetEdgeTypeFromProto(BinExport2::FlowGraph::Edge::Type type) {
   }
 }
 
-void EdgesFromEdgeProto(
+absl::Status EdgesFromEdgeProto(
     const BinExport2& proto, const BinExport2::FlowGraph& flow_graph_proto,
     const std::vector<Address>& addresses,
     const std::vector<uint64_t>& instruction_addresses,
@@ -77,6 +87,18 @@ void EdgesFromEdgeProto(
                           FlowGraph::Graph::edges_size_type>>* edges,
     std::vector<FlowGraph::EdgeProperty>* edge_properties) {
   for (const auto& edge : flow_graph_proto.edge()) {
+    if (edge.source_basic_block_index() < 0 ||
+        edge.source_basic_block_index() >= proto.basic_block_size() ||
+        edge.target_basic_block_index() < 0 ||
+        edge.target_basic_block_index() >= proto.basic_block_size()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Found an invalid binexport proto for binary: ",
+          proto.meta_information().executable_id(),
+          " - invalid basic block index inside the flow graph - source basic "
+          "block index: ",
+          edge.source_basic_block_index(),
+          " target basic block index: ", edge.target_basic_block_index()));
+    }
     const Address source_address =
         instruction_addresses[proto.basic_block(edge.source_basic_block_index())
                                   .instruction_index(0)
@@ -100,6 +122,7 @@ void EdgesFromEdgeProto(
       edge_properties->push_back(edge_property);
     }
   }
+  return absl::OkStatus();
 }
 
 void AssignVertexProperties(
@@ -138,8 +161,27 @@ FlowGraph::Vertex FlowGraph::GetVertex(Address address) const {
 
 std::unique_ptr<FlowGraph> FlowGraph::FromBinExport2Proto(
     const BinExport2& proto, const BinExport2::FlowGraph& flow_graph_proto,
+    const std::vector<uint64_t>& instruction_addresses) {
+  auto flow_graph =
+      FromBinExport2(proto, flow_graph_proto, instruction_addresses);
+  if (!flow_graph.ok()) {
+    LOG(FATAL) << "Failed to create flow graph: " << flow_graph.status();
+    return nullptr;
+  }
+  return std::move(flow_graph.value());
+}
+
+absl::StatusOr<std::unique_ptr<FlowGraph>> FlowGraph::FromBinExport2(
+    const BinExport2& proto, const BinExport2::FlowGraph& flow_graph_proto,
     const std::vector<Address>& instruction_addresses) {
   auto flow_graph = absl::make_unique<FlowGraph>();
+  if (flow_graph_proto.entry_basic_block_index() < 0 ||
+      flow_graph_proto.entry_basic_block_index() >= proto.basic_block_size()) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Invalid entry basic block for binary: ",
+        proto.meta_information().executable_id(),
+        " - entry bb index: ", flow_graph_proto.entry_basic_block_index()));
+  }
   int entry_instruction_index =
       proto.basic_block(flow_graph_proto.entry_basic_block_index())
           .instruction_index(0)
@@ -153,6 +195,15 @@ std::unique_ptr<FlowGraph> FlowGraph::FromBinExport2Proto(
   addresses.reserve(flow_graph_proto.basic_block_index_size());
 
   for (int basic_block_index : flow_graph_proto.basic_block_index()) {
+    if (basic_block_index < 0 ||
+        basic_block_index >= proto.basic_block_size()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Found an invalid binexport proto for binary: ",
+                       proto.meta_information().executable_id(),
+                       " - invalid basic block index inside the flow graph - "
+                       "basic block index: ",
+                       basic_block_index));
+    }
     const BinExport2::BasicBlock& basic_block_proto(
         proto.basic_block(basic_block_index));
     VertexProperty vertex_property;
@@ -195,8 +246,9 @@ std::unique_ptr<FlowGraph> FlowGraph::FromBinExport2Proto(
   edges.reserve(flow_graph_proto.edge_size());
   std::vector<EdgeProperty> edge_properties;
   edge_properties.reserve(flow_graph_proto.edge_size());
-  EdgesFromEdgeProto(proto, flow_graph_proto, addresses, instruction_addresses,
-                     &edges, &edge_properties);
+  NA_RETURN_IF_ERROR(EdgesFromEdgeProto(proto, flow_graph_proto, addresses,
+                                     instruction_addresses, &edges,
+                                     &edge_properties));
   flow_graph->graph_ = Graph(boost::edges_are_unsorted_multi_pass,
                              edges.begin(), edges.end(), addresses.size());
   flow_graph->architecture_ = GetSupportedArchitecture(proto);
